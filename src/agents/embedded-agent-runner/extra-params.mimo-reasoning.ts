@@ -34,8 +34,12 @@ const MIMO_STRICT_REASONING_TAGS_MODEL_IDS = new Set([
   "mimo-v2.6-pro-ultraspeed",
 ]);
 
-/** True when the model is a MiMo v2.5+ OpenAI-completions model. */
-export function isMiMoStrictReasoningTagsModel(model: Parameters<StreamFn>[0]): boolean {
+/**
+ * True when the model is a MiMo v2.5+ OpenAI-completions model.
+ * Intentionally module-private: production observes it through
+ * `createMiMoStrictReasoningTagsWrapper`, and tests through the extra-params seam.
+ */
+function isMiMoStrictReasoningTagsModel(model: Parameters<StreamFn>[0]): boolean {
   const normalizedModelId = normalizeReasoningFamilyModelId(model.id);
   return (
     model.api === "openai-completions" &&

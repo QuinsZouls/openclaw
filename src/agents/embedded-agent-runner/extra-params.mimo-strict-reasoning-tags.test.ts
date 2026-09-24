@@ -2,7 +2,6 @@ import { reasoningTagTextPolicy } from "@openclaw/ai/internal/openai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createLlmStreamSimpleMock } from "../../../test/helpers/agents/llm-stream-simple-mock.js";
 import type { Model } from "../../llm/types.js";
-import { isMiMoStrictReasoningTagsModel } from "./extra-params.mimo-reasoning.js";
 
 vi.mock("../../llm/stream.js", () => createLlmStreamSimpleMock());
 
@@ -16,13 +15,13 @@ function mimoModel(modelId: string, api = "openai-completions"): Model<"openai-c
   } as Model<"openai-completions">;
 }
 
-function runMiMoStrictCase(modelId: string) {
+function runMiMoStrictCase(modelId: string, api = "openai-completions") {
   return runExtraParamsCase({
     applyProvider: "xiaomi-coding",
     applyModelId: modelId,
     mockProviderRuntime: true,
     thinkingLevel: "high",
-    model: mimoModel(modelId),
+    model: mimoModel(modelId, api),
     payload: {
       model: modelId,
       messages: [],
@@ -55,17 +54,30 @@ describe("extra-params: MiMo strict reasoning-tag fallback", () => {
     expect(reasoningTagTextPolicy.isStrictOnFlush(captured.options)).toBe(false);
   });
 
-  it("classifies MiMo strict reasoning-tag models from the extracted sibling module", () => {
-    expect(isMiMoStrictReasoningTagsModel(mimoModel("mimo-v2.6-pro"))).toBe(true);
-    expect(isMiMoStrictReasoningTagsModel(mimoModel("mimo-v2.5"))).toBe(true);
+  // The classifier itself is module-private; it is observed through the extra-params
+  // seam, so these cases replace direct calls on the extracted sibling module.
+  it.each([
+    // Every member of MIMO_STRICT_REASONING_TAGS_MODEL_IDS is asserted, so list drift
+    // between this fallback and the owned-provider list fails loudly.
+    ["mimo-v2.5", "openai-completions", true],
+    ["mimo-v2.5-pro", "openai-completions", true],
+    ["mimo-v2.6-flash", "openai-completions", true],
+    ["mimo-v2.6-pro", "openai-completions", true],
+    ["mimo-v2.6-pro-ultraspeed", "openai-completions", true],
     // Proxy routes and `:suffix` variants normalize to the same leaf id.
-    expect(isMiMoStrictReasoningTagsModel(mimoModel("xiaomi-orbit/mimo-v2.6-flash:high"))).toBe(
-      true,
-    );
+    ["xiaomi-orbit/mimo-v2.6-flash:high", "openai-completions", true],
     // Legacy visible-text models and non-completions transports stay unmatched.
-    expect(isMiMoStrictReasoningTagsModel(mimoModel("mimo-v2-pro"))).toBe(false);
-    expect(isMiMoStrictReasoningTagsModel(mimoModel("mimo-v2.6-pro", "openai-responses"))).toBe(
-      false,
-    );
-  });
+    ["mimo-v2-pro", "openai-completions", false],
+    ["mimo-v2.6-pro", "openai-responses", false],
+  ] as const)(
+    "marks strict-on-flush only for MiMo v2.5+ openai-completions models (%s on %s)",
+    (modelId, api, strictOnFlush) => {
+      const captured = runMiMoStrictCase(modelId, api);
+      // Guard the seam: an undefined capture would make the negative rows pass vacuously
+      // if a future api-gated wrapper stopped delegating to the captured stream.
+      expect(captured.options).toBeDefined();
+      expect(reasoningTagTextPolicy.isStrictOnFlush(captured.options)).toBe(strictOnFlush);
+      expect(reasoningTagTextPolicy.isStrict(captured.options)).toBe(false);
+    },
+  );
 });
