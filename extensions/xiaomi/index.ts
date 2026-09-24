@@ -23,7 +23,7 @@ import {
 } from "openclaw/plugin-sdk/provider-model-shared";
 import {
   createDeepSeekV4OpenAICompatibleThinkingWrapper,
-  createMiMoStrictReasoningTagsWrapper,
+  createStrictReasoningTagsWrapper,
 } from "openclaw/plugin-sdk/provider-stream-shared";
 import { PROVIDER_LABELS } from "openclaw/plugin-sdk/provider-usage";
 import {
@@ -65,13 +65,13 @@ const XIAOMI_PROVIDER_HOOKS = {
   normalizeResolvedModel: ({ model }: { model: ProviderRuntimeModel }) =>
     applyModelCompatPatch(model, { omitEmptyArrayItems: true }),
   wrapStreamFn: (ctx: ProviderWrapStreamFnContext) =>
-    createMiMoStrictReasoningTagsWrapper({
+    createStrictReasoningTagsWrapper({
       baseStreamFn: createDeepSeekV4OpenAICompatibleThinkingWrapper({
         baseStreamFn: ctx.streamFn,
         thinkingLevel: ctx.thinkingLevel,
         shouldPatchModel: isMiMoReasoningModelRef,
       }),
-      shouldMarkStrict: isMiMoStrictReasoningTagsModelRef,
+      shouldMarkStrictOnFlush: isMiMoStrictReasoningTagsModelRef,
     }),
   resolveThinkingProfile: ({ modelId }: { modelId: string }) => resolveMiMoThinkingProfile(modelId),
   isModernModelRef: ({ modelId }: { modelId: string }) =>

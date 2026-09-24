@@ -29,7 +29,6 @@ import { streamWithPayloadPatch } from "../../llm/providers/stream-wrappers/stre
 import type { SimpleStreamOptions } from "../../llm/types.js";
 import {
   createDeepSeekV4OpenAICompatibleThinkingWrapper,
-  createMiMoStrictReasoningTagsWrapper,
   createThinkingOnlyFinalTextWrapper,
 } from "../../plugin-sdk/provider-stream-shared.js";
 import {
@@ -46,6 +45,10 @@ import {
 import type { AgentRuntimeTransport } from "../runtime-plan/types.js";
 import type { StreamFn } from "../runtime/index.js";
 import type { SettingsManager } from "../sessions/index.js";
+import {
+  createMiMoStrictReasoningTagsWrapper,
+  normalizeReasoningFamilyModelId,
+} from "./extra-params.mimo-reasoning.js";
 import { log } from "./logger.js";
 import { parseCacheRetention, resolveCacheRetention } from "./prompt-cache-retention.js";
 import type { ProviderThinkLevel } from "./utils.js";
@@ -717,12 +720,9 @@ function applyPostPluginStreamWrappers(
       shouldPatchModel: isMiMoReasoningAsVisibleTextOpenAICompatibleModel,
     });
     // vLLM mimo-parser endpoints can leak inline `<think>` thinking into visible
-    // content with the closer absorbed; strict partitioning keeps that hidden
-    // so reasoning-visibility toggles remain authoritative (issue #156803).
-    ctx.agent.streamFn = createMiMoStrictReasoningTagsWrapper({
-      baseStreamFn: ctx.agent.streamFn,
-      shouldMarkStrict: isMiMoStrictReasoningTagsModel,
-    });
+    // content with the closer absorbed; hidden at each flush boundary for MiMo
+    // v2.5+ so reasoning-visibility toggles stay authoritative (issue #156803).
+    ctx.agent.streamFn = createMiMoStrictReasoningTagsWrapper(ctx.agent.streamFn);
 
     // Guard Google-family payloads against invalid negative thinking budgets
     // emitted by upstream model-ID heuristics for Gemini 3.1 variants.
@@ -787,22 +787,12 @@ function applyPostPluginStreamWrappers(
   log.warn(`ignoring invalid parallel_tool_calls param: ${summary}`);
 }
 
-function normalizeDeepSeekV4CandidateId(modelId: unknown): string | undefined {
-  if (typeof modelId !== "string") {
-    return undefined;
-  }
-  const normalized = modelId.trim().toLowerCase();
-  const suffixIndex = normalized.indexOf(":");
-  const withoutSuffix = suffixIndex === -1 ? normalized : normalized.slice(0, suffixIndex);
-  return withoutSuffix.split("/").pop();
-}
-
 function isDeepSeekV4OpenAICompatibleModel(model: Parameters<StreamFn>[0]): boolean {
   return isDeepSeekV4OpenAICompletionsModel(model) && !isMicrosoftFoundryProviderId(model.provider);
 }
 
 function isDeepSeekV4OpenAICompletionsModel(model: Parameters<StreamFn>[0]): boolean {
-  const normalizedModelId = normalizeDeepSeekV4CandidateId(model.id);
+  const normalizedModelId = normalizeReasoningFamilyModelId(model.id);
   return (
     model.api === "openai-completions" &&
     (normalizedModelId === "deepseek-v4-flash" || normalizedModelId === "deepseek-v4-pro")
@@ -897,7 +887,7 @@ const MIMO_REASONING_OPENAI_COMPATIBLE_MODEL_IDS = new Set([
 const MIMO_REASONING_AS_VISIBLE_TEXT_MODEL_IDS = new Set(["mimo-v2-pro", "mimo-v2-omni"]);
 
 function isMiMoReasoningOpenAICompatibleModel(model: Parameters<StreamFn>[0]): boolean {
-  const normalizedModelId = normalizeDeepSeekV4CandidateId(model.id);
+  const normalizedModelId = normalizeReasoningFamilyModelId(model.id);
   return (
     model.api === "openai-completions" &&
     normalizedModelId !== undefined &&
@@ -908,32 +898,11 @@ function isMiMoReasoningOpenAICompatibleModel(model: Parameters<StreamFn>[0]): b
 function isMiMoReasoningAsVisibleTextOpenAICompatibleModel(
   model: Parameters<StreamFn>[0],
 ): boolean {
-  const normalizedModelId = normalizeDeepSeekV4CandidateId(model.id);
+  const normalizedModelId = normalizeReasoningFamilyModelId(model.id);
   return (
     model.api === "openai-completions" &&
     normalizedModelId !== undefined &&
     MIMO_REASONING_AS_VISIBLE_TEXT_MODEL_IDS.has(normalizedModelId)
-  );
-}
-
-// mimo-v2.5+ models use the reasoning_content wire format; legacy mimo-v2-pro/omni
-// intentionally put final answers in reasoning_content and must not be forced strict.
-// Keep in sync with MIMO_REASONING_MODEL_IDS in extensions/xiaomi/thinking.ts
-// (the owned-provider path); this set covers custom OpenAI-compatible proxies.
-const MIMO_STRICT_REASONING_TAGS_MODEL_IDS = new Set([
-  "mimo-v2.5",
-  "mimo-v2.5-pro",
-  "mimo-v2.6-flash",
-  "mimo-v2.6-pro",
-  "mimo-v2.6-pro-ultraspeed",
-]);
-
-function isMiMoStrictReasoningTagsModel(model: Parameters<StreamFn>[0]): boolean {
-  const normalizedModelId = normalizeDeepSeekV4CandidateId(model.id);
-  return (
-    model.api === "openai-completions" &&
-    normalizedModelId !== undefined &&
-    MIMO_STRICT_REASONING_TAGS_MODEL_IDS.has(normalizedModelId)
   );
 }
 

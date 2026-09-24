@@ -1,3 +1,4 @@
+import type { AssistantMessageEvent } from "@openclaw/llm-core";
 import { describe, expect, it } from "vitest";
 import { processCompletionsStream } from "./openai-completions-stream.js";
 import {
@@ -367,7 +368,11 @@ describe("openai completions stream: MiMo inline reasoning leak on tool-call tur
     );
   }
 
-  async function runLeakyStream(chunks: unknown[], strict: boolean) {
+  async function runLeakyStream(
+    chunks: readonly unknown[] | AsyncIterable<never>,
+    strict: boolean | "on-flush",
+    events?: AssistantMessageEvent[],
+  ) {
     const model = makeCompletionsModel({
       id: "mimo-v2.6-pro",
       name: "MiMo V2.6 Pro",
@@ -375,11 +380,21 @@ describe("openai completions stream: MiMo inline reasoning leak on tool-call tur
       baseUrl: "http://localhost:8000/v1",
     });
     const output = createAssistantOutput(model);
+    // Accept a pre-built chunk iterable too: one test snapshots event counts
+    // per pulled chunk via a local generator wrapper.
+    const chunkStream: AsyncIterable<never> =
+      Symbol.asyncIterator in chunks
+        ? chunks
+        : streamChunks(chunks as Parameters<typeof streamChunks>[0]);
     await processCompletionsStream(
-      streamChunks(chunks as Parameters<typeof streamChunks>[0]),
+      chunkStream,
       output,
       model,
-      { push() {} },
+      {
+        push(event) {
+          events?.push(event);
+        },
+      },
       { strictReasoningTags: strict },
     );
     return output;
@@ -403,7 +418,7 @@ describe("openai completions stream: MiMo inline reasoning leak on tool-call tur
     ];
   }
 
-  it("hides unclosed inline reasoning from visible text when strictReasoningTags is enabled", async () => {
+  it("hides unclosed inline reasoning from visible text when strictReasoningTags is enabled (strict-on-flush)", async () => {
     const model = makeCompletionsModel({
       id: "mimo-v2.6-pro",
       name: "MiMo V2.6 Pro",
@@ -417,7 +432,7 @@ describe("openai completions stream: MiMo inline reasoning leak on tool-call tur
       output,
       model,
       { push() {} },
-      { strictReasoningTags: true },
+      { strictReasoningTags: "on-flush" },
     );
 
     const visibleText = output.content
@@ -463,7 +478,7 @@ describe("openai completions stream: MiMo inline reasoning leak on tool-call tur
     expect(toolCalls).toHaveLength(1);
   });
 
-  it("hides a reasoning opener split across streamed chunks when strict is enabled", async () => {
+  it("hides a reasoning opener split across streamed chunks when strict-on-flush is enabled", async () => {
     // Packet boundaries may cut the opener itself ("<thi" | "nk>"); the tag
     // probe must still route the whole block away from visible text.
     const output = await runLeakyStream(
@@ -482,7 +497,7 @@ describe("openai completions stream: MiMo inline reasoning leak on tool-call tur
         }),
         makeCompletionsChunk({}, "tool_calls" as const),
       ],
-      true,
+      "on-flush",
     );
 
     expect(visibleTextOf(output)).toBe("");
@@ -505,7 +520,7 @@ describe("openai completions stream: MiMo inline reasoning leak on tool-call tur
         }),
         makeCompletionsChunk({}, "tool_calls" as const),
       ],
-      true,
+      "on-flush",
     );
 
     expect(visibleTextOf(output)).toBe("");
@@ -513,28 +528,134 @@ describe("openai completions stream: MiMo inline reasoning leak on tool-call tur
   });
 
   it("drops leaked reasoning instead of promoting it into the thinking lane", async () => {
-    const output = await runLeakyStream(makeLeakyToolCallChunks(), true);
+    const output = await runLeakyStream(makeLeakyToolCallChunks(), "on-flush");
 
-    // Strict mode classifies the unclosed block as reasoning and drops it;
-    // it must never resurface as a thinking block on the visible output.
+    // Strict-on-flush classifies the unclosed block as reasoning and drops it
+    // at flush; it must never resurface as a thinking block on the visible output.
     expect(output.content.some((block) => block.type === "thinking")).toBe(false);
     expect(visibleTextOf(output)).toBe("");
   });
 
-  it("keeps streaming ordinary visible text when strict is enabled", async () => {
-    // Strict mode must not over-hide: normal answers without reasoning tags
-    // still stream through (paragraph boundaries release buffered text).
-    const output = await runLeakyStream(
-      [
-        makeCompletionsChunk({ content: "All good.\n\n" }),
-        makeCompletionsChunk({ content: "Nothing here is hidden." }),
-        makeCompletionsChunk({}, "stop" as const),
-      ],
-      true,
-    );
+  it("keeps streaming ordinary visible text incrementally when strict-on-flush is enabled", async () => {
+    // Strict-on-flush must not over-hide: ordinary answers keep streaming as
+    // incremental text events instead of one blob buffered until flush.
+    const events: AssistantMessageEvent[] = [];
+    const inputs = [
+      makeCompletionsChunk({ content: "All good.\n\n" }),
+      makeCompletionsChunk({ content: "Nothing here is hidden." }),
+      makeCompletionsChunk({}, "stop" as const),
+    ];
+    // Local generator wrapper: records the event count right after each chunk
+    // is pulled, so the test can prove text reached the consumer before the
+    // final chunk was consumed (full strict would hold everything until flush).
+    const eventsAfterChunk: number[] = [];
+    async function* trackedChunks() {
+      for (const chunk of inputs) {
+        yield chunk as never;
+        eventsAfterChunk.push(events.length);
+      }
+    }
+
+    const output = await runLeakyStream(trackedChunks(), "on-flush", events);
 
     expect(visibleTextOf(output)).toContain("All good.");
     expect(visibleTextOf(output)).toContain("Nothing here is hidden.");
     expect(output.stopReason).toBe("stop");
+
+    // Per-chunk streaming: at least two distinct text deltas, not one merged
+    // blob (full strict would merge them into a single flush release).
+    const textDeltaPayloads = events.flatMap((event) =>
+      event.type === "text_delta" ? [event.delta] : [],
+    );
+    expect(textDeltaPayloads.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(textDeltaPayloads).size).toBeGreaterThanOrEqual(2);
+
+    // Incremental delivery: visible text already existed before the last
+    // (finish-reason) chunk was pulled.
+    expect(eventsAfterChunk).toHaveLength(inputs.length);
+    const eventsBeforeFinalChunk = eventsAfterChunk[eventsAfterChunk.length - 2] ?? 0;
+    expect(
+      events.slice(0, eventsBeforeFinalChunk).some((event) => event.type === "text_delta"),
+    ).toBe(true);
+  });
+
+  it("keeps post-tool-call answers streaming after a strict-on-flush boundary", async () => {
+    const events: AssistantMessageEvent[] = [];
+    const output = await runLeakyStream(
+      [
+        makeCompletionsChunk({ content: "<thinking>leaked reasoning" }),
+        makeCompletionsChunk({
+          tool_calls: [
+            {
+              index: 0,
+              id: "call_1",
+              type: "function" as const,
+              function: { name: "lookup", arguments: "{}" },
+            },
+          ],
+        }),
+        makeCompletionsChunk({ content: "Real " }),
+        makeCompletionsChunk({ content: "answer." }),
+        makeCompletionsChunk({}, "stop" as const),
+      ],
+      "on-flush",
+      events,
+    );
+
+    // The tool-call delta flushes the partitioner, so the unclosed inline
+    // reasoning stays hidden; the answer after the boundary streams as usual.
+    expect(visibleTextOf(output)).not.toContain("leaked");
+    expect(visibleTextOf(output)).toContain("Real answer.");
+    expect(output.stopReason).toBe("stop");
+    // Terminal finalization drops the provisional tool call because the stream
+    // finished with "stop" and produced visible text; the boundary itself stays
+    // observable on the event stream below.
+    expect(toolCallsOf(output)).toHaveLength(0);
+
+    // Order check: the answer's text delta is emitted after the tool-call events.
+    const lastToolCallEventIndex = events.findLastIndex(
+      (event) =>
+        event.type === "toolcall_start" ||
+        event.type === "toolcall_delta" ||
+        event.type === "toolcall_end",
+    );
+    const answerDeltaIndexes = events.flatMap((event, index) =>
+      event.type === "text_delta" && event.delta.includes("answer") ? [index] : [],
+    );
+    expect(lastToolCallEventIndex).toBeGreaterThanOrEqual(0);
+    expect(answerDeltaIndexes.length).toBeGreaterThanOrEqual(1);
+    expect(Math.min(...answerDeltaIndexes)).toBeGreaterThan(lastToolCallEventIndex);
+  });
+
+  it("documents the strict-on-flush boundary: a closer arriving after a flush is prose", async () => {
+    const output = await runLeakyStream(
+      [
+        makeCompletionsChunk({ content: "<thinking>leaked reasoning" }),
+        makeCompletionsChunk({
+          tool_calls: [
+            {
+              index: 0,
+              id: "call_1",
+              type: "function" as const,
+              function: { name: "lookup", arguments: "{}" },
+            },
+          ],
+        }),
+        makeCompletionsChunk({ content: "more reasoning</thinking>Final answer." }),
+        makeCompletionsChunk({}, "stop" as const),
+      ],
+      "on-flush",
+    );
+
+    // Accepted trade-off: after an intermediate flush the partitioner starts
+    // fresh, so a late closer is indistinguishable from prose and the text
+    // stays visible — matching non-strict visible semantics. The pre-boundary
+    // unclosed block is still hidden.
+    expect(visibleTextOf(output)).not.toContain("leaked");
+    expect(visibleTextOf(output)).toBe("more reasoning</thinking>Final answer.");
+    expect(output.stopReason).toBe("stop");
+    // Same terminal rule as above: a "stop" stream with visible text confirms no
+    // tool call, so only the text survives into the final message.
+    expect(toolCallsOf(output)).toHaveLength(0);
   });
 });
