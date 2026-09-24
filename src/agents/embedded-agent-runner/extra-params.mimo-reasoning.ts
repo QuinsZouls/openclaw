@@ -26,7 +26,7 @@ export function normalizeReasoningFamilyModelId(modelId: unknown): string | unde
 // (the owned-provider path); this set covers custom OpenAI-compatible proxies.
 // Add new MiMo reasoning models to both lists or strict reasoning-tag protection
 // silently misses one path.
-export const MIMO_STRICT_REASONING_TAGS_MODEL_IDS = new Set([
+const MIMO_STRICT_REASONING_TAGS_MODEL_IDS = new Set([
   "mimo-v2.5",
   "mimo-v2.5-pro",
   "mimo-v2.6-flash",

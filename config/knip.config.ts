@@ -641,6 +641,9 @@ const config = {
     "ui/src/pages/chat/composer-persistence.ts": ["exports"],
     // Focused media tests consume these explicit seams; production uses the helpers in-module.
     "src/agents/embedded-agent-subscribe.handlers.lifecycle.ts": ["exports"],
+    // Focused MiMo fallback tests consume this classification seam; production uses it
+    // in-module through createMiMoStrictReasoningTagsWrapper.
+    "src/agents/embedded-agent-runner/extra-params.mimo-reasoning.ts": ["exports"],
     "src/gateway/server-methods/chat-webchat-media.ts": ["exports"],
     // Greeting cache/fact contracts (hash, alert text, store shapes) are
     // asserted by the focused greeting unit tests, not by another prod module.
