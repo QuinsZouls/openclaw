@@ -29,6 +29,7 @@ import { streamWithPayloadPatch } from "../../llm/providers/stream-wrappers/stre
 import type { SimpleStreamOptions } from "../../llm/types.js";
 import {
   createDeepSeekV4OpenAICompatibleThinkingWrapper,
+  createMiMoStrictReasoningTagsWrapper,
   createThinkingOnlyFinalTextWrapper,
 } from "../../plugin-sdk/provider-stream-shared.js";
 import {
@@ -715,6 +716,13 @@ function applyPostPluginStreamWrappers(
       baseStreamFn: ctx.agent.streamFn,
       shouldPatchModel: isMiMoReasoningAsVisibleTextOpenAICompatibleModel,
     });
+    // vLLM mimo-parser endpoints can leak inline `<think>` thinking into visible
+    // content with the closer absorbed; strict partitioning keeps that hidden
+    // so reasoning-visibility toggles remain authoritative (issue #156803).
+    ctx.agent.streamFn = createMiMoStrictReasoningTagsWrapper({
+      baseStreamFn: ctx.agent.streamFn,
+      shouldMarkStrict: isMiMoStrictReasoningTagsModel,
+    });
 
     // Guard Google-family payloads against invalid negative thinking budgets
     // emitted by upstream model-ID heuristics for Gemini 3.1 variants.
@@ -905,6 +913,27 @@ function isMiMoReasoningAsVisibleTextOpenAICompatibleModel(
     model.api === "openai-completions" &&
     normalizedModelId !== undefined &&
     MIMO_REASONING_AS_VISIBLE_TEXT_MODEL_IDS.has(normalizedModelId)
+  );
+}
+
+// mimo-v2.5+ models use the reasoning_content wire format; legacy mimo-v2-pro/omni
+// intentionally put final answers in reasoning_content and must not be forced strict.
+// Keep in sync with MIMO_REASONING_MODEL_IDS in extensions/xiaomi/thinking.ts
+// (the owned-provider path); this set covers custom OpenAI-compatible proxies.
+const MIMO_STRICT_REASONING_TAGS_MODEL_IDS = new Set([
+  "mimo-v2.5",
+  "mimo-v2.5-pro",
+  "mimo-v2.6-flash",
+  "mimo-v2.6-pro",
+  "mimo-v2.6-pro-ultraspeed",
+]);
+
+function isMiMoStrictReasoningTagsModel(model: Parameters<StreamFn>[0]): boolean {
+  const normalizedModelId = normalizeDeepSeekV4CandidateId(model.id);
+  return (
+    model.api === "openai-completions" &&
+    normalizedModelId !== undefined &&
+    MIMO_STRICT_REASONING_TAGS_MODEL_IDS.has(normalizedModelId)
   );
 }
 

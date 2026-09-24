@@ -727,6 +727,8 @@ export {
 } from "../llm/providers/stream-wrappers/moonshot-thinking.js";
 export { streamWithPayloadPatch };
 export { createToolStreamWrapper } from "../llm/providers/stream-wrappers/zai.js";
+// MiMo v2.5+ strict reasoning-tag partitioning wrapper for vLLM mimo-parser endpoints.
+export { createMiMoStrictReasoningTagsWrapper } from "../llm/providers/stream-wrappers/mimo-reasoning-tags.js";
 
 export { applyCompletionsAnthropicCacheControl } from "@openclaw/ai/transports";
 export { projectCopilotRequestFacts } from "@openclaw/ai/internal/shared";

@@ -343,3 +343,198 @@ describe("openai completions stream", () => {
     ).rejects.toThrow(expectedError);
   });
 });
+
+describe("openai completions stream: MiMo inline reasoning leak on tool-call turns (#156803)", () => {
+  function visibleTextOf(output: ReturnType<typeof createAssistantOutput>) {
+    return output.content
+      .filter((block): block is { type: "text"; text: string } => block.type === "text")
+      .map((block) => block.text)
+      .join("");
+  }
+
+  function toolCallsOf(
+    output: ReturnType<typeof createAssistantOutput>,
+  ): Array<{ type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> }> {
+    return output.content.filter(
+      (
+        block,
+      ): block is {
+        type: "toolCall";
+        id: string;
+        name: string;
+        arguments: Record<string, unknown>;
+      } => block.type === "toolCall",
+    );
+  }
+
+  async function runLeakyStream(chunks: unknown[], strict: boolean) {
+    const model = makeCompletionsModel({
+      id: "mimo-v2.6-pro",
+      name: "MiMo V2.6 Pro",
+      provider: "vllm",
+      baseUrl: "http://localhost:8000/v1",
+    });
+    const output = createAssistantOutput(model);
+    await processCompletionsStream(
+      streamChunks(chunks as Parameters<typeof streamChunks>[0]),
+      output,
+      model,
+      { push() {} },
+      { strictReasoningTags: strict },
+    );
+    return output;
+  }
+
+  function makeLeakyToolCallChunks() {
+    // vLLM mimo parser streams a literal opener and absorbs the closer server-side.
+    return [
+      makeCompletionsChunk({ content: "<think>secret reasoning step" }),
+      makeCompletionsChunk({
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_1",
+            type: "function" as const,
+            function: { name: "lookup", arguments: '{"query":"weather"}' },
+          },
+        ],
+      }),
+      makeCompletionsChunk({}, "tool_calls" as const),
+    ];
+  }
+
+  it("hides unclosed inline reasoning from visible text when strictReasoningTags is enabled", async () => {
+    const model = makeCompletionsModel({
+      id: "mimo-v2.6-pro",
+      name: "MiMo V2.6 Pro",
+      provider: "vllm",
+      baseUrl: "http://localhost:8000/v1",
+    });
+    const output = createAssistantOutput(model);
+
+    await processCompletionsStream(
+      streamChunks(makeLeakyToolCallChunks()),
+      output,
+      model,
+      { push() {} },
+      { strictReasoningTags: true },
+    );
+
+    const visibleText = output.content
+      .filter((block): block is { type: "text"; text: string } => block.type === "text")
+      .map((block) => block.text)
+      .join("");
+    expect(visibleText).toBe("");
+    expect(visibleText).not.toContain("secret reasoning step");
+
+    const toolCalls = toolCallsOf(output);
+    expect(output.stopReason).toBe("toolUse");
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls[0]?.name).toBe("lookup");
+    expect(toolCalls[0]?.arguments).toEqual({ query: "weather" });
+  });
+
+  it("reproduces the leak as visible text when strictReasoningTags is disabled", async () => {
+    const model = makeCompletionsModel({
+      id: "mimo-v2.6-pro",
+      name: "MiMo V2.6 Pro",
+      provider: "vllm",
+      baseUrl: "http://localhost:8000/v1",
+    });
+    const output = createAssistantOutput(model);
+
+    await processCompletionsStream(
+      streamChunks(makeLeakyToolCallChunks()),
+      output,
+      model,
+      { push() {} },
+      { strictReasoningTags: false },
+    );
+
+    // Non-strict mode recovers the unclosed pending buffer as visible TEXT at
+    // the tool-call boundary — this is the leak reported in issue #156803.
+    const visibleText = output.content
+      .filter((block): block is { type: "text"; text: string } => block.type === "text")
+      .map((block) => block.text)
+      .join("");
+    expect(visibleText).toContain("secret reasoning step");
+
+    const toolCalls = toolCallsOf(output);
+    expect(toolCalls).toHaveLength(1);
+  });
+
+  it("hides a reasoning opener split across streamed chunks when strict is enabled", async () => {
+    // Packet boundaries may cut the opener itself ("<thi" | "nk>"); the tag
+    // probe must still route the whole block away from visible text.
+    const output = await runLeakyStream(
+      [
+        makeCompletionsChunk({ content: "<thi" }),
+        makeCompletionsChunk({ content: "nk>secret reasoning step" }),
+        makeCompletionsChunk({
+          tool_calls: [
+            {
+              index: 0,
+              id: "call_1",
+              type: "function" as const,
+              function: { name: "lookup", arguments: "{}" },
+            },
+          ],
+        }),
+        makeCompletionsChunk({}, "tool_calls" as const),
+      ],
+      true,
+    );
+
+    expect(visibleTextOf(output)).toBe("");
+    expect(toolCallsOf(output)).toHaveLength(1);
+  });
+
+  it("hides inline reasoning when content and tool calls share one chunk", async () => {
+    const output = await runLeakyStream(
+      [
+        makeCompletionsChunk({
+          content: "<think>secret reasoning step",
+          tool_calls: [
+            {
+              index: 0,
+              id: "call_1",
+              type: "function" as const,
+              function: { name: "lookup", arguments: "{}" },
+            },
+          ],
+        }),
+        makeCompletionsChunk({}, "tool_calls" as const),
+      ],
+      true,
+    );
+
+    expect(visibleTextOf(output)).toBe("");
+    expect(toolCallsOf(output)).toHaveLength(1);
+  });
+
+  it("drops leaked reasoning instead of promoting it into the thinking lane", async () => {
+    const output = await runLeakyStream(makeLeakyToolCallChunks(), true);
+
+    // Strict mode classifies the unclosed block as reasoning and drops it;
+    // it must never resurface as a thinking block on the visible output.
+    expect(output.content.some((block) => block.type === "thinking")).toBe(false);
+    expect(visibleTextOf(output)).toBe("");
+  });
+
+  it("keeps streaming ordinary visible text when strict is enabled", async () => {
+    // Strict mode must not over-hide: normal answers without reasoning tags
+    // still stream through (paragraph boundaries release buffered text).
+    const output = await runLeakyStream(
+      [
+        makeCompletionsChunk({ content: "All good.\n\n" }),
+        makeCompletionsChunk({ content: "Nothing here is hidden." }),
+        makeCompletionsChunk({}, "stop" as const),
+      ],
+      true,
+    );
+
+    expect(visibleTextOf(output)).toContain("All good.");
+    expect(visibleTextOf(output)).toContain("Nothing here is hidden.");
+    expect(output.stopReason).toBe("stop");
+  });
+});

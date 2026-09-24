@@ -26,6 +26,23 @@ export function isMiMoReasoningModelRef(model: { provider?: string; id?: unknown
   );
 }
 
+// mimo-v2.5+ models use the reasoning_content wire format; legacy mimo-v2-pro/omni
+// intentionally put final answers in reasoning_content and must not be forced strict.
+// MIMO_REASONING_MODEL_IDS already covers exactly the v2.5/v2.5-pro/v2.6-* set.
+// Keep in sync with MIMO_STRICT_REASONING_TAGS_MODEL_IDS in
+// src/agents/embedded-agent-runner/extra-params.ts (the fallback for unowned
+// OpenAI-compatible proxies that bypass this extension's wrapStreamFn).
+export function isMiMoStrictReasoningTagsModelRef(model: {
+  provider?: string;
+  id?: unknown;
+}): boolean {
+  return (
+    isMiMoProviderId(model.provider) &&
+    typeof model.id === "string" &&
+    isMiMoReasoningModelId(model.id)
+  );
+}
+
 const MIMO_THINKING_LEVEL_IDS = [
   "off",
   "minimal",
